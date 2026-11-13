@@ -11,6 +11,7 @@
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QIcon>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLayout>
 #include <QLineEdit>
@@ -53,6 +54,21 @@ constexpr int kInputRowHeightPx = 24;
 std::function<bool(const QString&)> g_start_folder_probe;
 int g_start_folder_timeout_ms = -1;
 bool g_use_system_dialog = false;
+
+// Enter navigates to the typed path without also triggering the dialog's
+// default Open/Save button.
+class PathEdit final : public QLineEdit {
+ public:
+  using QLineEdit::QLineEdit;
+
+ protected:
+  void keyPressEvent(QKeyEvent* event) override {
+    QLineEdit::keyPressEvent(event);
+    if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) {
+      event->accept();
+    }
+  }
+};
 
 #ifndef PJ_TARGET_WASM
 // How long the dialog waits for a folder to answer before giving up on it.
@@ -185,6 +201,19 @@ FileDialog::FileDialog(QWidget* parent) : Dialog(parent) {
   inner_->setWindowFlags(Qt::Widget);
   inner_->setSizeGripEnabled(false);
 
+  auto* path_widget = new QWidget(contentWidget());
+  auto* path_row = new QHBoxLayout(path_widget);
+  path_row->setContentsMargins(0, 0, 0, 0);
+  auto* path_label = new QLabel(tr("Path:"), path_widget);
+  auto* path_edit = new PathEdit(path_widget);
+  path_edit->setObjectName(u"pathEdit"_s);
+  path_edit->setPlaceholderText(tr("Enter a folder or full file path, then press Enter"));
+  path_edit->setText(QDir::toNativeSeparators(inner_->directory().absolutePath()));
+  path_edit->setFixedHeight(kInputRowHeightPx);
+  path_label->setBuddy(path_edit);
+  path_row->addWidget(path_label);
+  path_row->addWidget(path_edit);
+  contentLayout()->addWidget(path_widget);
   contentLayout()->addWidget(inner_);
 
   // Shown by setDirectory() when the requested start folder did not answer. A
@@ -199,6 +228,33 @@ FileDialog::FileDialog(QWidget* parent) : Dialog(parent) {
   if (auto* grid = qobject_cast<QGridLayout*>(inner_->layout())) {
     grid->addWidget(start_folder_notice_, grid->rowCount(), 0, 1, grid->columnCount());
   }
+
+  connect(inner_, &QFileDialog::directoryEntered, path_edit, [path_edit](const QString& directory) {
+    path_edit->setText(QDir::toNativeSeparators(directory));
+  });
+  connect(path_edit, &QLineEdit::returnPressed, this, [this, path_edit] {
+    QString path = path_edit->text().trimmed();
+    // Windows Explorer's "Copy as path" surrounds paths with double quotes.
+    if (path.size() >= 2 && path.startsWith(u'"') && path.endsWith(u'"')) {
+      path = path.mid(1, path.size() - 2);
+    }
+    if (path.isEmpty()) {
+      return;
+    }
+    const QFileInfo info(inner_->directory(), QDir::fromNativeSeparators(path));
+    if (info.isDir()) {
+      setDirectory(info.absoluteFilePath());
+    } else if (inner_->fileMode() != QFileDialog::Directory &&
+               (info.isFile() || (inner_->acceptMode() == QFileDialog::AcceptSave && info.dir().exists()))) {
+      setDirectory(info.absolutePath());
+      inner_->selectFile(info.fileName());
+    } else {
+      start_folder_notice_->setText(tr("Path does not exist or cannot be selected: %1").arg(path));
+      start_folder_notice_->show();
+      return;
+    }
+    path_edit->setText(QDir::toNativeSeparators(inner_->directory().absolutePath()));
+  });
 
   // Swap Qt's stock SP_FileDialog* icons (native theme glyphs that clash
   // with our flat chrome) for our keyboard_arrow_* chevrons. The _light
@@ -311,6 +367,9 @@ void FileDialog::setDirectory(const QString& directory) {
   if (foldersAnsweringInTime({directory}).front() != 0) {
     start_folder_notice_->hide();
     inner_->setDirectory(directory);
+    if (auto* path_edit = findChild<QLineEdit*>(u"pathEdit"_s)) {
+      path_edit->setText(QDir::toNativeSeparators(inner_->directory().absolutePath()));
+    }
     return;
   }
   // Stay at the home folder chosen in the constructor rather than block on the

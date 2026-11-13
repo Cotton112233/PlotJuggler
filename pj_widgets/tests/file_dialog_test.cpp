@@ -7,9 +7,12 @@
 #include <QCheckBox>
 #include <QDir>
 #include <QElapsedTimer>
+#include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QKeyEvent>
 #include <QLabel>
+#include <QLineEdit>
 #include <QSettings>
 #include <QStandardPaths>
 #include <QTemporaryDir>
@@ -149,6 +152,63 @@ TEST_F(FileDialogStartFolderTest, ReachableFolderIsUsedAndNoticeHidden) {
         QFileInfo(file_dialog->directory().absolutePath()).canonicalFilePath(),
         QFileInfo(temp.path()).canonicalFilePath());
     EXPECT_TRUE(notice->isHidden());
+  });
+}
+
+TEST_F(FileDialogStartFolderTest, TypedRelativeFolderNavigatesWithoutAccepting) {
+  QTemporaryDir temp;
+  ASSERT_TRUE(temp.isValid());
+  ASSERT_TRUE(QDir(temp.path()).mkdir(u"中文 folder"_s));
+  openAndInspect(temp.path(), [&temp](QFileDialog* file_dialog, QLabel*) {
+    auto* outer = QApplication::activeModalWidget();
+    auto* path_edit = outer->findChild<QLineEdit*>(u"pathEdit"_s);
+    ASSERT_NE(path_edit, nullptr);
+    EXPECT_EQ(path_edit->text(), QDir::toNativeSeparators(file_dialog->directory().absolutePath()));
+    path_edit->setText(u"中文 folder"_s);
+    QKeyEvent enter(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+    QApplication::sendEvent(path_edit, &enter);
+    EXPECT_EQ(file_dialog->directory().canonicalPath(), QDir(temp.filePath(u"中文 folder"_s)).canonicalPath());
+    EXPECT_TRUE(outer->isVisible());
+  });
+}
+
+TEST_F(FileDialogStartFolderTest, TypedQuotedUnicodeFileIsSelectedWithoutAccepting) {
+  QTemporaryDir temp;
+  ASSERT_TRUE(temp.isValid());
+  ASSERT_TRUE(QDir(temp.path()).mkdir(u"中文 folder"_s));
+  const QString path = temp.filePath(u"中文 folder/步行 数据.csv"_s);
+  QFile file(path);
+  ASSERT_TRUE(file.open(QIODevice::WriteOnly));
+  file.write("time,value\n0,1\n");
+  file.close();
+  openAndInspect(temp.path(), [&path](QFileDialog* file_dialog, QLabel*) {
+    auto* outer = QApplication::activeModalWidget();
+    auto* path_edit = outer->findChild<QLineEdit*>(u"pathEdit"_s);
+    ASSERT_NE(path_edit, nullptr);
+    path_edit->setText(u"\"%1\""_s.arg(QDir::toNativeSeparators(path)));
+    QKeyEvent enter(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+    QApplication::sendEvent(path_edit, &enter);
+    EXPECT_EQ(
+        QFileInfo(file_dialog->selectedFiles().value(0)).canonicalFilePath(), QFileInfo(path).canonicalFilePath());
+    EXPECT_TRUE(outer->isVisible());
+  });
+}
+
+TEST_F(FileDialogStartFolderTest, TypedMissingPathShowsNoticeAndKeepsFolder) {
+  QTemporaryDir temp;
+  ASSERT_TRUE(temp.isValid());
+  openAndInspect(temp.path(), [](QFileDialog* file_dialog, QLabel* notice) {
+    auto* outer = QApplication::activeModalWidget();
+    auto* path_edit = outer->findChild<QLineEdit*>(u"pathEdit"_s);
+    ASSERT_NE(path_edit, nullptr);
+    const QString before = file_dialog->directory().absolutePath();
+    path_edit->setText(u"missing/file.csv"_s);
+    QKeyEvent enter(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+    QApplication::sendEvent(path_edit, &enter);
+    EXPECT_EQ(file_dialog->directory().absolutePath(), before);
+    EXPECT_FALSE(notice->isHidden());
+    EXPECT_TRUE(notice->text().contains(u"missing/file.csv"_s));
+    EXPECT_TRUE(outer->isVisible());
   });
 }
 
